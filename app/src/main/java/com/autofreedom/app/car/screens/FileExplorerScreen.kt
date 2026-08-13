@@ -101,11 +101,25 @@ class FileExplorerScreen(
                             .addText("$sizeStr • ${ext.uppercase()}")
 
                         if (isPlayable) {
+                            val isVideo = ext in setOf(
+                                "mp4", "mkv", "avi", "mov", "webm", "3gp", "flv"
+                            )
                             rowBuilder.setOnClickListener {
-                                val uri = android.net.Uri.fromFile(file)
-                                MediaService.instance?.playbackEngine?.playUri(
-                                    uri, file.nameWithoutExtension
-                                )
+                                if (isVideo) {
+                                    // Play video directly on car screen
+                                    val uri = android.net.Uri.fromFile(file)
+                                    screenManager.push(
+                                        VideoPlayerScreen(
+                                            carContext, uri, file.nameWithoutExtension
+                                        )
+                                    )
+                                } else {
+                                    // Play audio through media service
+                                    val uri = android.net.Uri.fromFile(file)
+                                    MediaService.instance?.playbackEngine?.playUri(
+                                        uri, file.nameWithoutExtension
+                                    )
+                                }
                             }
                         }
 

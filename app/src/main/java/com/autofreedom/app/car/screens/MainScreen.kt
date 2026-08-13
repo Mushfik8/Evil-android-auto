@@ -9,6 +9,7 @@ import androidx.car.app.model.GridTemplate
 import androidx.car.app.model.ItemList
 import androidx.car.app.model.Template
 import androidx.core.graphics.drawable.IconCompat
+import com.autofreedom.app.AutoFreedomApplication
 
 /**
  * Main home screen — a grid of feature tiles:

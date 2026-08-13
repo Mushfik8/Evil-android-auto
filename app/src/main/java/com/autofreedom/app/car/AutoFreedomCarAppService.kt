@@ -1,6 +1,5 @@
 package com.autofreedom.app.car
 
-import android.content.Intent
 import android.content.pm.ApplicationInfo
 import androidx.car.app.CarAppService
 import androidx.car.app.Session
