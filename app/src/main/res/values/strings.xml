@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoFreedom</string>
+    <string name="app_description">Your car, your freedom. Browse, navigate, play.</string>
+
+    <!-- Main tabs -->
+    <string name="tab_home">Home</string>
+    <string name="tab_browser">Browser</string>
+    <string name="tab_map">Map</string>
+    <string name="tab_media">Media</string>
+    <string name="tab_files">Files</string>
+    <string name="tab_search">Search</string>
+
+    <!-- Browser -->
+    <string name="browser_title">Web Browser</string>
+    <string name="browser_url_hint">Enter URL or search…</string>
+    <string name="browser_home_url">https://www.google.com</string>
+    <string name="browser_youtube_url">https://m.youtube.com</string>
+    <string name="browser_maps_url">https://maps.google.com</string>
+    <string name="browser_loading">Loading…</string>
+    <string name="browser_go">Go</string>
+    <string name="browser_back">Back</string>
+    <string name="browser_forward">Forward</string>
+    <string name="browser_refresh">Refresh</string>
+    <string name="browser_home">Home</string>
+    <string name="browser_youtube">YouTube</string>
+    <string name="browser_maps">Maps</string>
+    <string name="browser_keyboard">Type URL</string>
+
+    <!-- Media -->
+    <string name="media_title">Media Player</string>
+    <string name="media_now_playing">Now Playing</string>
+    <string name="media_all_songs">All Songs</string>
+    <string name="media_folders">Folders</string>
+    <string name="media_artists">Artists</string>
+    <string name="media_albums">Albums</string>
+    <string name="media_videos">Videos</string>
+    <string name="media_no_files">No media files found</string>
+    <string name="media_unknown_artist">Unknown Artist</string>
+    <string name="media_unknown_album">Unknown Album</string>
+
+    <!-- Navigation -->
+    <string name="nav_title">Navigation</string>
+    <string name="nav_search_hint">Search places…</string>
+    <string name="nav_my_location">My Location</string>
+    <string name="nav_zoom_in">Zoom In</string>
+    <string name="nav_zoom_out">Zoom Out</string>
+
+    <!-- Search -->
+    <string name="search_title">Search</string>
+    <string name="search_hint">Search the web, files, or places…</string>
+    <string name="search_web_results">Web Results</string>
+    <string name="search_file_results">Files</string>
+    <string name="search_place_results">Places</string>
+
+    <!-- File Explorer -->
+    <string name="files_title">File Explorer</string>
+    <string name="files_internal">Internal Storage</string>
+    <string name="files_empty">This folder is empty</string>
+    <string name="files_parent_dir">← Back</string>
+
+    <!-- Phone UI -->
+    <string name="phone_welcome">Welcome to AutoFreedom</string>
+    <string name="phone_description">Connect your phone to your car via Android Auto to use the full experience on your car screen.</string>
+    <string name="phone_status_connected">✅ Connected to Car</string>
+    <string name="phone_status_disconnected">⏳ Waiting for car connection…</string>
+    <string name="phone_grant_permissions">Grant Permissions</string>
+    <string name="phone_permissions_granted">All permissions granted ✅</string>
+    <string name="phone_open_settings">Open Settings</string>
+
+    <!-- Quick Bookmarks -->
+    <string name="bookmark_youtube">YouTube</string>
+    <string name="bookmark_google">Google</string>
+    <string name="bookmark_maps">Google Maps</string>
+    <string name="bookmark_twitter">Twitter/X</string>
+    <string name="bookmark_reddit">Reddit</string>
+    <string name="bookmark_wikipedia">Wikipedia</string>
+</resources>

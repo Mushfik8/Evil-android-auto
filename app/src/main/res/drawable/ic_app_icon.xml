@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Background circle -->
+    <path
+        android:fillColor="#6C63FF"
+        android:pathData="M54,54m-50,0a50,50 0,1 1,100 0a50,50 0,1 1,-100 0" />
+    <!-- Globe/browser icon -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,24c-16.57,0 -30,13.43 -30,30s13.43,30 30,30s30,-13.43 30,-30S70.57,24 54,24zM78,52h-10c-0.45,-5.77 -1.94,-11.16 -4.22,-15.82C69.71,39.38 74.97,45.1 78,52zM54,28c3.26,0 7.35,6.38 8.7,16H45.3C46.65,34.38 50.74,28 54,28zM44.22,36.18C41.94,40.84 40.45,46.23 40,52H30c3.03,-6.9 8.29,-12.62 14.22,-15.82zM30,56h10c0.45,5.77 1.94,11.16 4.22,15.82C38.29,68.62 33.03,62.9 30,56zM54,80c-3.26,0 -7.35,-6.38 -8.7,-16h17.4C61.35,73.62 57.26,80 54,80zM63.78,71.82C66.06,67.16 67.55,61.77 68,56h10C74.97,62.9 69.71,68.62 63.78,71.82z" />
+    <!-- Play button overlay -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M48,42l20,12l-20,12z" />
+</vector>

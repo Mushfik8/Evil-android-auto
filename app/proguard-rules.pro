@@ -1,0 +1,4 @@
+-keep class com.autofreedom.app.** { *; }
+-keep class androidx.car.app.** { *; }
+-keep class androidx.media3.** { *; }
+-dontwarn org.maplibre.**
