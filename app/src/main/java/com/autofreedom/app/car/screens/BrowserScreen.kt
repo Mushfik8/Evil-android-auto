@@ -17,13 +17,14 @@ import androidx.lifecycle.LifecycleOwner
 import com.autofreedom.app.renderer.WebViewRenderer
 
 /**
- * Full-screen web browser rendered onto the Android Auto car display.
+ * Full-screen web browser on the Android Auto car display.
  *
- * Uses NavigationTemplate (the only template with a Surface) to render
- * a WebView captured as bitmaps. Touch events from the car screen are
- * forwarded to the WebView for full interactivity.
- *
- * Quick-launch URLs: YouTube, Google, Maps can be opened instantly.
+ * FIXED:
+ * - Fullscreen video works (YouTube, Bioscope, Chorki etc)
+ * - Audio plays through car speakers (audio focus)
+ * - Chrome UA so streaming sites accept the browser
+ * - Prominent search/keyboard button
+ * - Quick-launch buttons: YouTube, Maps, Search, Home
  */
 class BrowserScreen(
     carContext: CarContext,
@@ -37,28 +38,15 @@ class BrowserScreen(
     private val webViewRenderer = WebViewRenderer(carContext)
     private var surfaceWidth = 1280
     private var surfaceHeight = 720
-    private var currentTitle = "AutoFreedom Browser"
-    private var isLoading = false
 
     init {
         lifecycle.addObserver(this)
 
-        // Set up WebView callbacks
-        webViewRenderer.onTitleChanged = { title ->
-            currentTitle = title
-            invalidate()
-        }
-        webViewRenderer.onPageStarted = { _ ->
-            isLoading = true
-            invalidate()
-        }
-        webViewRenderer.onPageFinished = { _ ->
-            isLoading = false
-            invalidate()
-        }
+        webViewRenderer.onTitleChanged = { invalidate() }
+        webViewRenderer.onPageStarted = { invalidate() }
+        webViewRenderer.onPageFinished = { invalidate() }
         webViewRenderer.onInputFocused = { focused ->
             if (focused) {
-                // When a web input field is tapped, open keyboard screen
                 screenManager.push(
                     BrowserKeyboardScreen(carContext) { typedText ->
                         webViewRenderer.injectText(typedText)
@@ -70,8 +58,7 @@ class BrowserScreen(
     }
 
     override fun onCreate(owner: LifecycleOwner) {
-        Log.i(TAG, "BrowserScreen created, initializing WebView")
-        // Register surface callback to receive the car display surface
+        Log.i(TAG, "BrowserScreen created")
         carContext.getCarService(androidx.car.app.AppManager::class.java)
             .setSurfaceCallback(this)
     }
@@ -95,18 +82,12 @@ class BrowserScreen(
     }
 
     override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
-        Log.i(TAG, "Surface destroyed")
         webViewRenderer.stopRendering()
         webViewRenderer.setSurface(null, 0, 0)
     }
 
-    override fun onVisibleAreaChanged(visibleArea: Rect) {
-        Log.d(TAG, "Visible area: $visibleArea")
-    }
-
-    override fun onStableAreaChanged(stableArea: Rect) {
-        Log.d(TAG, "Stable area: $stableArea")
-    }
+    override fun onVisibleAreaChanged(visibleArea: Rect) {}
+    override fun onStableAreaChanged(stableArea: Rect) {}
 
     override fun onScroll(distanceX: Float, distanceY: Float) {
         webViewRenderer.handleScroll(distanceX, distanceY)
@@ -127,9 +108,10 @@ class BrowserScreen(
     // ==================== Template ====================
 
     override fun onGetTemplate(): Template {
+        // TOP ACTION STRIP — browser controls
         val actionStrip = ActionStrip.Builder()
 
-        // 🔙 Back button
+        // 🔙 Back
         actionStrip.addAction(
             Action.Builder()
                 .setIcon(
@@ -145,7 +127,7 @@ class BrowserScreen(
                 .build()
         )
 
-        // ➡️ Forward button
+        // ➡️ Forward
         actionStrip.addAction(
             Action.Builder()
                 .setIcon(
@@ -153,13 +135,11 @@ class BrowserScreen(
                         IconCompat.createWithResource(carContext, android.R.drawable.ic_media_next)
                     ).build()
                 )
-                .setOnClickListener {
-                    webViewRenderer.goForward()
-                }
+                .setOnClickListener { webViewRenderer.goForward() }
                 .build()
         )
 
-        // 🔄 Refresh button
+        // 🔄 Refresh
         actionStrip.addAction(
             Action.Builder()
                 .setIcon(
@@ -167,20 +147,14 @@ class BrowserScreen(
                         IconCompat.createWithResource(carContext, android.R.drawable.ic_menu_rotate)
                     ).build()
                 )
-                .setOnClickListener {
-                    webViewRenderer.reload()
-                }
+                .setOnClickListener { webViewRenderer.reload() }
                 .build()
         )
 
-        // ⌨️ URL / Keyboard button
+        // 🔍 SEARCH / TYPE URL — most important button
         actionStrip.addAction(
             Action.Builder()
-                .setIcon(
-                    CarIcon.Builder(
-                        IconCompat.createWithResource(carContext, android.R.drawable.ic_menu_edit)
-                    ).build()
-                )
+                .setTitle("Search")
                 .setOnClickListener {
                     screenManager.push(
                         BrowserKeyboardScreen(carContext) { typedText ->
@@ -191,14 +165,10 @@ class BrowserScreen(
                 .build()
         )
 
-        // Build the navigation template with our surface
-        val builder = NavigationTemplate.Builder()
-            .setActionStrip(actionStrip.build())
-
-        // Map action strip (bottom of screen) — quick launch bookmarks
+        // BOTTOM MAP ACTION STRIP — quick launch shortcuts
         val mapActionStrip = ActionStrip.Builder()
 
-        // 📺 YouTube quick launch
+        // 📺 YouTube
         mapActionStrip.addAction(
             Action.Builder()
                 .setTitle("YT")
@@ -208,7 +178,7 @@ class BrowserScreen(
                 .build()
         )
 
-        // 🗺️ Google Maps quick launch
+        // 🗺️ Maps
         mapActionStrip.addAction(
             Action.Builder()
                 .setTitle("Maps")
@@ -218,7 +188,7 @@ class BrowserScreen(
                 .build()
         )
 
-        // 🏠 Home (Google)
+        // 🏠 Home / Google
         mapActionStrip.addAction(
             Action.Builder()
                 .setTitle("Home")
@@ -228,8 +198,9 @@ class BrowserScreen(
                 .build()
         )
 
-        builder.setMapActionStrip(mapActionStrip.build())
-
-        return builder.build()
+        return NavigationTemplate.Builder()
+            .setActionStrip(actionStrip.build())
+            .setMapActionStrip(mapActionStrip.build())
+            .build()
     }
 }

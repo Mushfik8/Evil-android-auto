@@ -3,6 +3,12 @@ package com.autofreedom.app.renderer
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -10,31 +16,37 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.View
+import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Renders a WebView offscreen and draws frames to an Android Auto Surface.
+ * REWRITTEN — Renders a WebView offscreen and draws frames to an Android Auto Surface.
  *
- * Architecture:
- * 1. WebView is created on the main (UI) thread
- * 2. A render loop (15fps) captures the WebView as a Bitmap on the UI thread
- * 3. The bitmap is drawn to the AA Surface on a background thread
- * 4. Touch/scroll events from SurfaceCallback are forwarded to the WebView
+ * KEY FIX: Handles fullscreen video via WebChromeClient.onShowCustomView().
+ * When a user taps fullscreen on YouTube/any video, the video View is captured
+ * and rendered directly to the Surface instead of the WebView bitmap.
  *
- * This approach avoids overheating by capping at 15fps and reusing bitmaps.
+ * Audio: Requests AudioFocus so sound comes through the car speakers.
+ * User Agent: Spoofs Chrome Mobile so YouTube/streaming sites work.
  */
 class WebViewRenderer(private val context: Context) {
 
     companion object {
         private const val TAG = "WebViewRenderer"
-        private const val RENDER_INTERVAL_MS = 66L  // ~15fps — battery friendly
+        private const val RENDER_INTERVAL_MS = 50L  // ~20fps for smoother video
         private const val DEFAULT_URL = "https://www.google.com"
+
+        // Chrome Mobile user agent — makes YouTube/streaming sites work
+        private const val CHROME_UA =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.165 Mobile Safari/537.36"
     }
 
     private var webView: WebView? = null
@@ -45,6 +57,16 @@ class WebViewRenderer(private val context: Context) {
     private var surfaceHeight = 0
     private val isRendering = AtomicBoolean(false)
     private val isInitialized = AtomicBoolean(false)
+
+    // Fullscreen video state
+    private var fullscreenVideoView: View? = null
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
+    private val isFullscreenVideo = AtomicBoolean(false)
+
+    // Audio
+    private var audioManager: AudioManager? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var hasAudioFocus = false
 
     // Callbacks
     var onPageStarted: ((String) -> Unit)? = null
@@ -59,7 +81,6 @@ class WebViewRenderer(private val context: Context) {
 
     /**
      * Initialize the WebView on the main thread.
-     * Must be called before any other methods.
      */
     fun initialize(width: Int, height: Int) {
         mainHandler.post {
@@ -67,18 +88,22 @@ class WebViewRenderer(private val context: Context) {
                 surfaceWidth = width
                 surfaceHeight = height
 
+                // Init audio manager
+                audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
                 webView = WebView(context).apply {
-                    // Layout the WebView to match the car screen dimensions
+                    // Layout to match car screen
                     measure(
                         View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
                         View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
                     )
                     layout(0, 0, width, height)
 
-                    // Enable full web capabilities
+                    // Full web capabilities
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
+                        @Suppress("DEPRECATION")
                         databaseEnabled = true
                         mediaPlaybackRequiresUserGesture = false
                         loadWithOverviewMode = true
@@ -93,27 +118,22 @@ class WebViewRenderer(private val context: Context) {
                         cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                         setSupportMultipleWindows(false)
 
-                        // Set a mobile user agent for better YouTube compatibility
-                        userAgentString = userAgentString.replace(
-                            "wv",
-                            "Chrome/120.0.0.0 Mobile"
-                        )
+                        // CRITICAL: Chrome Mobile UA — makes YouTube/Bioscope/Chorki WORK
+                        userAgentString = CHROME_UA
                     }
 
-                    // WebView client for page lifecycle
+                    // Enable cookies (needed for YouTube login, site preferences)
+                    val cookieManager = CookieManager.getInstance()
+                    cookieManager.setAcceptCookie(true)
+                    cookieManager.setAcceptThirdPartyCookies(this, true)
+
+                    // WebView client
                     webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): Boolean {
-                            return false // Handle all URLs in our WebView
-                        }
+                            view: WebView?, request: WebResourceRequest?
+                        ): Boolean = false
 
-                        override fun onPageStarted(
-                            view: WebView?,
-                            url: String?,
-                            favicon: Bitmap?
-                        ) {
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             url?.let {
                                 currentUrl.set(it)
                                 onPageStarted?.invoke(it)
@@ -125,12 +145,13 @@ class WebViewRenderer(private val context: Context) {
                                 currentUrl.set(it)
                                 onPageFinished?.invoke(it)
                             }
-                            // Inject JavaScript to detect input focus
                             injectInputDetection()
+                            // Inject helper JS for better video handling
+                            injectVideoHelper()
                         }
                     }
 
-                    // Chrome client for progress and title
+                    // CRITICAL: WebChromeClient with fullscreen video support
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
                             onProgressChanged?.invoke(newProgress)
@@ -142,20 +163,62 @@ class WebViewRenderer(private val context: Context) {
                                 onTitleChanged?.invoke(it)
                             }
                         }
+
+                        /**
+                         * CRITICAL: Called when a video enters fullscreen mode.
+                         * YouTube, Bioscope, Chorki — when user taps the fullscreen
+                         * button on a video player, this method is called with the
+                         * video View. We render THIS view to the Surface instead of
+                         * the WebView bitmap, which gives us actual video frames.
+                         */
+                        override fun onShowCustomView(
+                            view: View?,
+                            callback: CustomViewCallback?
+                        ) {
+                            Log.i(TAG, "🎬 FULLSCREEN VIDEO STARTED")
+                            view ?: return
+
+                            fullscreenVideoView = view
+                            fullscreenCallback = callback
+                            isFullscreenVideo.set(true)
+
+                            // Layout the video view to match surface
+                            view.measure(
+                                View.MeasureSpec.makeMeasureSpec(surfaceWidth, View.MeasureSpec.EXACTLY),
+                                View.MeasureSpec.makeMeasureSpec(surfaceHeight, View.MeasureSpec.EXACTLY)
+                            )
+                            view.layout(0, 0, surfaceWidth, surfaceHeight)
+
+                            // Request audio focus for video sound
+                            requestAudioFocus()
+                        }
+
+                        /**
+                         * Called when video exits fullscreen.
+                         * Switch back to WebView bitmap rendering.
+                         */
+                        override fun onHideCustomView() {
+                            Log.i(TAG, "🎬 FULLSCREEN VIDEO ENDED")
+                            isFullscreenVideo.set(false)
+                            fullscreenVideoView = null
+                            fullscreenCallback?.onCustomViewHidden()
+                            fullscreenCallback = null
+                            abandonAudioFocus()
+                        }
                     }
 
-                    // JavaScript bridge for input detection
+                    // JavaScript bridge
                     addJavascriptInterface(InputBridge(), "AutoFreedomBridge")
 
-                    // Enable hardware acceleration drawing
+                    // SOFTWARE layer forces bitmap capture to include all content
                     setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 }
 
-                // Create reusable bitmap for rendering
+                // Reusable bitmap
                 renderBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
 
                 isInitialized.set(true)
-                Log.i(TAG, "WebView initialized: ${width}x${height}")
+                Log.i(TAG, "WebView initialized: ${width}x${height} with Chrome UA")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize WebView", e)
@@ -168,7 +231,7 @@ class WebViewRenderer(private val context: Context) {
      */
     fun setSurface(surface: Surface?, width: Int, height: Int) {
         this.surface = surface
-        if (width != surfaceWidth || height != surfaceHeight) {
+        if (surface != null && (width != surfaceWidth || height != surfaceHeight)) {
             surfaceWidth = width
             surfaceHeight = height
             mainHandler.post {
@@ -179,47 +242,61 @@ class WebViewRenderer(private val context: Context) {
                     )
                     layout(0, 0, width, height)
                 }
-                // Recreate bitmap at new size
                 renderBitmap?.recycle()
                 renderBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             }
         }
     }
 
-    /**
-     * Start the render loop. Captures WebView content and draws to Surface.
-     */
     fun startRendering() {
         if (isRendering.getAndSet(true)) return
         Log.i(TAG, "Starting render loop")
+        requestAudioFocus()
         renderLoop()
     }
 
-    /**
-     * Stop the render loop.
-     */
     fun stopRendering() {
         isRendering.set(false)
         Log.i(TAG, "Stopping render loop")
     }
 
+    /**
+     * CORE RENDER LOOP — switches between WebView bitmap and fullscreen video
+     */
     private fun renderLoop() {
         if (!isRendering.get()) return
 
         mainHandler.post {
             try {
-                val wv = webView ?: return@post
-                val bmp = renderBitmap ?: return@post
                 val srf = surface ?: return@post
-
                 if (!srf.isValid) {
                     scheduleNextFrame()
                     return@post
                 }
 
-                // Draw WebView to bitmap (must happen on UI thread)
+                val bmp = renderBitmap ?: return@post
                 val bitmapCanvas = Canvas(bmp)
-                wv.draw(bitmapCanvas)
+
+                if (isFullscreenVideo.get() && fullscreenVideoView != null) {
+                    // ===== FULLSCREEN VIDEO MODE =====
+                    // Render the video View directly — gives us actual video frames
+                    val videoView = fullscreenVideoView!!
+
+                    // Re-layout in case size changed
+                    videoView.measure(
+                        View.MeasureSpec.makeMeasureSpec(surfaceWidth, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(surfaceHeight, View.MeasureSpec.EXACTLY)
+                    )
+                    videoView.layout(0, 0, surfaceWidth, surfaceHeight)
+
+                    // Clear with black then draw video
+                    bitmapCanvas.drawColor(Color.BLACK)
+                    videoView.draw(bitmapCanvas)
+                } else {
+                    // ===== NORMAL BROWSING MODE =====
+                    val wv = webView ?: return@post
+                    wv.draw(bitmapCanvas)
+                }
 
                 // Draw bitmap to Surface
                 try {
@@ -244,31 +321,75 @@ class WebViewRenderer(private val context: Context) {
         }
     }
 
-    // ==================== Navigation Methods ====================
+    // ==================== Audio Focus ====================
+
+    private fun requestAudioFocus() {
+        val am = audioManager ?: return
+        if (hasAudioFocus) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener { }
+                .build()
+            audioFocusRequest = req
+            val result = am.requestAudioFocus(req)
+            hasAudioFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            Log.i(TAG, "Audio focus request: ${if (hasAudioFocus) "GRANTED" else "DENIED"}")
+        } else {
+            @Suppress("DEPRECATION")
+            val result = am.requestAudioFocus(
+                {}, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN
+            )
+            hasAudioFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            am.abandonAudioFocus {}
+        }
+        hasAudioFocus = false
+    }
+
+    // ==================== Navigation ====================
 
     fun loadUrl(url: String) {
         mainHandler.post {
-            val finalUrl = if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                if (url.contains(".") && !url.contains(" ")) {
-                    "https://$url"
-                } else {
-                    "https://www.google.com/search?q=${java.net.URLEncoder.encode(url, "UTF-8")}"
-                }
-            } else {
-                url
+            // Exit fullscreen if active
+            if (isFullscreenVideo.get()) {
+                exitFullscreen()
+            }
+
+            val finalUrl = when {
+                url.startsWith("http://") || url.startsWith("https://") -> url
+                url.contains(".") && !url.contains(" ") -> "https://$url"
+                else -> "https://www.google.com/search?q=${java.net.URLEncoder.encode(url, "UTF-8")}"
             }
             webView?.loadUrl(finalUrl)
+            requestAudioFocus()
         }
     }
 
     fun goBack(): Boolean {
+        if (isFullscreenVideo.get()) {
+            exitFullscreen()
+            return true
+        }
         val wv = webView ?: return false
         return if (wv.canGoBack()) {
             mainHandler.post { wv.goBack() }
             true
-        } else {
-            false
-        }
+        } else false
     }
 
     fun goForward(): Boolean {
@@ -276,86 +397,77 @@ class WebViewRenderer(private val context: Context) {
         return if (wv.canGoForward()) {
             mainHandler.post { wv.goForward() }
             true
-        } else {
-            false
-        }
+        } else false
     }
 
     fun reload() {
         mainHandler.post { webView?.reload() }
     }
 
+    fun exitFullscreen() {
+        mainHandler.post {
+            fullscreenCallback?.onCustomViewHidden()
+            isFullscreenVideo.set(false)
+            fullscreenVideoView = null
+            fullscreenCallback = null
+        }
+    }
+
     fun getCurrentUrl(): String = currentUrl.get()
     fun getCurrentTitle(): String = currentTitle.get()
-
-    fun canGoBack(): Boolean = webView?.canGoBack() == true
+    fun canGoBack(): Boolean = webView?.canGoBack() == true || isFullscreenVideo.get()
     fun canGoForward(): Boolean = webView?.canGoForward() == true
 
-    // ==================== Touch Event Handling ====================
+    // ==================== Touch Events ====================
 
-    /**
-     * Handle a tap/click from the car screen.
-     * Coordinates are relative to the Surface.
-     */
     fun handleClick(x: Float, y: Float) {
         mainHandler.post {
-            webView?.let { wv ->
+            val targetView = if (isFullscreenVideo.get()) fullscreenVideoView else webView
+            targetView?.let { v ->
                 val downTime = SystemClock.uptimeMillis()
                 val downEvent = MotionEvent.obtain(
-                    downTime, downTime,
-                    MotionEvent.ACTION_DOWN, x, y, 0
+                    downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0
                 )
-                wv.dispatchTouchEvent(downEvent)
+                v.dispatchTouchEvent(downEvent)
                 downEvent.recycle()
 
                 val upEvent = MotionEvent.obtain(
-                    downTime, downTime + 50,
-                    MotionEvent.ACTION_UP, x, y, 0
+                    downTime, downTime + 50, MotionEvent.ACTION_UP, x, y, 0
                 )
-                wv.dispatchTouchEvent(upEvent)
+                v.dispatchTouchEvent(upEvent)
                 upEvent.recycle()
             }
         }
     }
 
-    /**
-     * Handle scroll gestures from the car screen.
-     */
     fun handleScroll(distanceX: Float, distanceY: Float) {
         mainHandler.post {
+            if (isFullscreenVideo.get()) return@post
             webView?.scrollBy(distanceX.toInt(), distanceY.toInt())
         }
     }
 
-    /**
-     * Handle fling gestures from the car screen.
-     */
     fun handleFling(velocityX: Float, velocityY: Float) {
         mainHandler.post {
+            if (isFullscreenVideo.get()) return@post
             webView?.flingScroll(-velocityX.toInt(), -velocityY.toInt())
         }
     }
 
-    /**
-     * Handle pinch-to-zoom from the car screen.
-     */
     fun handleScale(focusX: Float, focusY: Float, scaleFactor: Float) {
         mainHandler.post {
+            if (isFullscreenVideo.get()) return@post
             webView?.let { wv ->
-                // Use JavaScript to zoom
                 val zoomLevel = (scaleFactor * 100).toInt()
                 wv.evaluateJavascript(
-                    "document.body.style.zoom = '${zoomLevel}%';",
-                    null
+                    "document.body.style.zoom = '${zoomLevel}%';", null
                 )
             }
         }
     }
 
-    /**
-     * Inject text into the currently focused input field.
-     * Used after keyboard input from SearchTemplate.
-     */
+    // ==================== Text Input ====================
+
     fun injectText(text: String) {
         mainHandler.post {
             val escaped = text.replace("'", "\\'").replace("\n", "\\n")
@@ -369,15 +481,11 @@ class WebViewRenderer(private val context: Context) {
                         el.dispatchEvent(new Event('change', { bubbles: true }));
                     }
                 })();
-                """.trimIndent(),
-                null
+                """.trimIndent(), null
             )
         }
     }
 
-    /**
-     * Submit the currently focused form (simulates Enter key).
-     */
     fun submitForm() {
         mainHandler.post {
             webView?.evaluateJavascript(
@@ -389,25 +497,26 @@ class WebViewRenderer(private val context: Context) {
                         if (form) {
                             form.submit();
                         } else {
-                            el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));
-                            el.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));
-                            el.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));
+                            el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',code:'Enter',keyCode:13,bubbles:true}));
+                            el.dispatchEvent(new KeyboardEvent('keypress', {key:'Enter',code:'Enter',keyCode:13,bubbles:true}));
+                            el.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter',code:'Enter',keyCode:13,bubbles:true}));
                         }
                     }
                 })();
-                """.trimIndent(),
-                null
+                """.trimIndent(), null
             )
         }
     }
 
-    // ==================== Input Detection ====================
+    // ==================== JavaScript Injection ====================
 
     private fun injectInputDetection() {
         mainHandler.post {
             webView?.evaluateJavascript(
                 """
                 (function() {
+                    if (window._afInputDetected) return;
+                    window._afInputDetected = true;
                     document.addEventListener('focusin', function(e) {
                         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
                             AutoFreedomBridge.onInputFocused(true);
@@ -419,15 +528,40 @@ class WebViewRenderer(private val context: Context) {
                         }
                     });
                 })();
-                """.trimIndent(),
-                null
+                """.trimIndent(), null
             )
         }
     }
 
     /**
-     * JavaScript bridge for detecting input field focus.
+     * Inject JavaScript that auto-clicks the fullscreen button on video players.
+     * Makes YouTube videos automatically go fullscreen for better car screen viewing.
      */
+    private fun injectVideoHelper() {
+        mainHandler.post {
+            webView?.evaluateJavascript(
+                """
+                (function() {
+                    if (window._afVideoHelper) return;
+                    window._afVideoHelper = true;
+
+                    // Auto-request fullscreen when a video starts playing
+                    document.addEventListener('play', function(e) {
+                        if (e.target.tagName === 'VIDEO') {
+                            try {
+                                var v = e.target;
+                                if (v.requestFullscreen) v.requestFullscreen();
+                                else if (v.webkitRequestFullscreen) v.webkitRequestFullscreen();
+                                else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+                            } catch(err) { console.log('AF: fullscreen failed', err); }
+                        }
+                    }, true);
+                })();
+                """.trimIndent(), null
+            )
+        }
+    }
+
     inner class InputBridge {
         @JavascriptInterface
         fun onInputFocused(focused: Boolean) {
@@ -439,6 +573,8 @@ class WebViewRenderer(private val context: Context) {
 
     fun destroy() {
         stopRendering()
+        exitFullscreen()
+        abandonAudioFocus()
         mainHandler.post {
             webView?.destroy()
             webView = null

@@ -71,11 +71,20 @@ class PlaybackEngine(private val context: Context) {
                     }
                 })
 
+                // CRITICAL: Set audio attributes for car media playback
+                setAudioAttributes(
+                    androidx.media3.common.AudioAttributes.Builder()
+                        .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                        .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MUSIC)
+                        .build(),
+                    true // Let ExoPlayer handle audio focus
+                )
+
                 // Set playback attributes for car audio
                 setWakeMode(android.os.PowerManager.PARTIAL_WAKE_LOCK)
             }
 
-        Log.i(TAG, "PlaybackEngine initialized")
+        Log.i(TAG, "PlaybackEngine initialized with audio focus")
     }
 
     /**
