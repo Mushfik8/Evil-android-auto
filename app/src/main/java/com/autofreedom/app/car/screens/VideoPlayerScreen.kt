@@ -7,6 +7,7 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.util.Log
+import android.view.Surface
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
@@ -22,17 +23,26 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
-import android.view.Surface
 
 /**
  * Video player screen — renders local video files directly on the car display.
  *
- * FIXED:
- * - ExoPlayer renders directly to Android Auto Surface (hardware accelerated)
- * - Audio focus requested so sound plays through car speakers
- * - Play/Pause, Seek ±10s, Close controls
+ * ARCHITECTURE:
+ * ExoPlayer renders directly to the Android Auto Surface (hardware accelerated).
+ * This gives us full video frames on the car screen without any bitmap copying.
+ *
+ * KEY FIX: Race condition between Surface availability and Player readiness.
+ * The Surface and Player are initialized independently. We only connect them
+ * when BOTH are ready. This prevents the "gray box" issue where the player
+ * tries to render before the surface exists.
+ *
+ * Also handles:
+ * - Audio focus for car speakers
+ * - Play/Pause, Seek ±10s/±30s, Close controls
  * - Tap screen to toggle play/pause
+ * - Proper cleanup on lifecycle events
  */
 class VideoPlayerScreen(
     carContext: CarContext,
@@ -44,9 +54,18 @@ class VideoPlayerScreen(
         private const val TAG = "VideoPlayerScreen"
     }
 
+    // Player state — initialized lazily
     private var player: ExoPlayer? = null
+    private var isPrepared = false
+
+    // Surface state — provided by Android Auto
     private var surface: Surface? = null
+    private var surfaceWidth = 0
+    private var surfaceHeight = 0
+
+    // UI state
     private var isPaused = false
+    private var positionText = ""
 
     // Audio focus
     private var audioManager: AudioManager? = null
@@ -57,16 +76,107 @@ class VideoPlayerScreen(
     }
 
     override fun onCreate(owner: LifecycleOwner) {
-        Log.i(TAG, "VideoPlayer created for: $videoTitle")
+        Log.i(TAG, "VideoPlayer created for: $videoTitle ($videoUri)")
         audioManager = carContext.getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
+
+        // Register for Surface events
         carContext.getCarService(androidx.car.app.AppManager::class.java)
             .setSurfaceCallback(this)
+
+        // Create player immediately (but don't attach surface yet)
+        createPlayer()
     }
 
     override fun onDestroy(owner: LifecycleOwner) {
         Log.i(TAG, "VideoPlayer destroyed")
         releasePlayer()
         abandonAudioFocus()
+    }
+
+    // ==================== Player Creation ====================
+
+    private fun createPlayer() {
+        if (player != null) return
+
+        // Request audio focus BEFORE creating player
+        requestAudioFocus()
+
+        player = ExoPlayer.Builder(carContext)
+            .build()
+            .apply {
+                // Set audio attributes for car media playback
+                setAudioAttributes(
+                    androidx.media3.common.AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                    false // We handle audio focus manually
+                )
+
+                // Video scaling — fit within bounds, maintain aspect ratio
+                videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+
+                addListener(object : Player.Listener {
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        isPaused = !isPlaying
+                        invalidate()
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        when (playbackState) {
+                            Player.STATE_ENDED -> {
+                                Log.i(TAG, "Video playback ended")
+                                screenManager.pop()
+                            }
+                            Player.STATE_READY -> {
+                                Log.i(TAG, "Video ready to play")
+                                isPrepared = true
+                            }
+                            Player.STATE_BUFFERING -> {
+                                Log.i(TAG, "Video buffering...")
+                            }
+                        }
+                    }
+
+                    override fun onVideoSizeChanged(videoSize: VideoSize) {
+                        Log.i(TAG, "Video size: ${videoSize.width}x${videoSize.height}")
+                    }
+                })
+
+                // Set the media item
+                setMediaItem(MediaItem.fromUri(videoUri))
+            }
+
+        Log.i(TAG, "ExoPlayer created (not yet attached to surface)")
+
+        // If surface is already available, connect now
+        connectPlayerToSurface()
+    }
+
+    /**
+     * KEY FIX: Only connect player to surface when BOTH are ready.
+     * This prevents the race condition where setVideoSurface is called
+     * before the surface exists, causing a gray/black screen.
+     */
+    private fun connectPlayerToSurface() {
+        val p = player ?: return
+        val s = surface ?: return
+
+        Log.i(TAG, "Connecting player to surface (${surfaceWidth}x${surfaceHeight})")
+
+        // Attach surface to player
+        p.setVideoSurface(s)
+
+        // Now prepare and play
+        if (!isPrepared) {
+            p.prepare()
+            p.play()
+            Log.i(TAG, "Player prepared and started on surface")
+        } else {
+            // Already prepared, just re-attach surface
+            if (!isPaused) p.play()
+            Log.i(TAG, "Player re-attached to surface")
+        }
     }
 
     // ==================== Audio Focus ====================
@@ -83,10 +193,22 @@ class VideoPlayerScreen(
                 )
                 .setOnAudioFocusChangeListener { focus ->
                     when (focus) {
-                        AudioManager.AUDIOFOCUS_LOSS -> player?.pause()
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> player?.pause()
-                        AudioManager.AUDIOFOCUS_GAIN -> player?.play()
+                        AudioManager.AUDIOFOCUS_LOSS -> {
+                            player?.pause()
+                            isPaused = true
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                            player?.pause()
+                            isPaused = true
+                        }
+                        AudioManager.AUDIOFOCUS_GAIN -> {
+                            if (isPaused) {
+                                player?.play()
+                                isPaused = false
+                            }
+                        }
                     }
+                    invalidate()
                 }
                 .build()
             audioFocusRequest = req
@@ -106,12 +228,17 @@ class VideoPlayerScreen(
     override fun onSurfaceAvailable(surfaceContainer: SurfaceContainer) {
         Log.i(TAG, "Surface available: ${surfaceContainer.width}x${surfaceContainer.height}")
         surface = surfaceContainer.surface
-        initializePlayer()
+        surfaceWidth = surfaceContainer.width
+        surfaceHeight = surfaceContainer.height
+
+        // Player may already be created — connect now
+        connectPlayerToSurface()
     }
 
     override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
         Log.i(TAG, "Surface destroyed")
-        releasePlayer()
+        // Detach surface from player (but keep player alive for re-attachment)
+        player?.setVideoSurface(null)
         surface = null
     }
 
@@ -129,48 +256,7 @@ class VideoPlayerScreen(
         }
     }
 
-    // ==================== Player ====================
-
-    private fun initializePlayer() {
-        val s = surface ?: return
-
-        // Request audio focus BEFORE creating player
-        requestAudioFocus()
-
-        player = ExoPlayer.Builder(carContext)
-            .build()
-            .apply {
-                // Set audio attributes for car media playback
-                setAudioAttributes(
-                    androidx.media3.common.AudioAttributes.Builder()
-                        .setUsage(C.USAGE_MEDIA)
-                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                        .build(),
-                    false // Don't handle audio focus in ExoPlayer — we handle it manually
-                )
-
-                // Render to AA Surface
-                setVideoSurface(s)
-                setMediaItem(MediaItem.fromUri(videoUri))
-
-                addListener(object : Player.Listener {
-                    override fun onIsPlayingChanged(isPlaying: Boolean) {
-                        isPaused = !isPlaying
-                        invalidate()
-                    }
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_ENDED) {
-                            screenManager.pop()
-                        }
-                    }
-                })
-
-                prepare()
-                play()
-            }
-
-        Log.i(TAG, "ExoPlayer initialized with audio focus, playing: $videoUri")
-    }
+    // ==================== Player Controls ====================
 
     private fun releasePlayer() {
         player?.apply {
@@ -178,6 +264,16 @@ class VideoPlayerScreen(
             release()
         }
         player = null
+        isPrepared = false
+    }
+
+    private fun formatTime(ms: Long): String {
+        val totalSec = ms / 1000
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        return if (h > 0) String.format("%d:%02d:%02d", h, m, s)
+        else String.format("%d:%02d", m, s)
     }
 
     // ==================== Template ====================
@@ -221,7 +317,7 @@ class VideoPlayerScreen(
                 .build()
         )
 
-        // ⏩ Forward 10s
+        // ⏩ Forward 30s
         actionStrip.addAction(
             Action.Builder()
                 .setIcon(
@@ -230,7 +326,7 @@ class VideoPlayerScreen(
                     ).build()
                 )
                 .setOnClickListener {
-                    player?.let { p -> p.seekTo(minOf(p.duration, p.currentPosition + 10_000)) }
+                    player?.let { p -> p.seekTo(minOf(p.duration, p.currentPosition + 30_000)) }
                 }
                 .build()
         )
@@ -251,8 +347,38 @@ class VideoPlayerScreen(
                 .build()
         )
 
+        // Bottom action strip with position info
+        val mapActionStrip = ActionStrip.Builder()
+
+        // Show current position / duration
+        val p = player
+        val posInfo = if (p != null && p.duration > 0) {
+            "${formatTime(p.currentPosition)} / ${formatTime(p.duration)}"
+        } else {
+            "Loading..."
+        }
+
+        mapActionStrip.addAction(
+            Action.Builder()
+                .setTitle(posInfo)
+                .setOnClickListener {
+                    // Refresh position display
+                    invalidate()
+                }
+                .build()
+        )
+
+        // Title display
+        mapActionStrip.addAction(
+            Action.Builder()
+                .setTitle(videoTitle.take(20))
+                .setOnClickListener { }
+                .build()
+        )
+
         return NavigationTemplate.Builder()
             .setActionStrip(actionStrip.build())
+            .setMapActionStrip(mapActionStrip.build())
             .build()
     }
 }

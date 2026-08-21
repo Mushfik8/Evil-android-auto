@@ -13,7 +13,10 @@ import com.autofreedom.app.AutoFreedomApplication
 
 /**
  * Main home screen — a grid of feature tiles:
- * Browser, Map, Media, Files, Search, YouTube (quick launch)
+ * Browser, YouTube, Bioscope, Chorki, Media, Files, Search, Maps, Hoichoi
+ *
+ * Quick access to all major features of AutoFreedom.
+ * Streaming sites open in the built-in browser for video playback on car screen.
  */
 class MainScreen(carContext: CarContext) : Screen(carContext) {
 
@@ -50,17 +53,32 @@ class MainScreen(carContext: CarContext) : Screen(carContext) {
                 .build()
         )
 
-        // 🗺️ Maps (quick launch — opens browser at Google Maps)
+        // 🎬 Bioscope (Bangladeshi streaming)
         gridItems.addItem(
             GridItem.Builder()
-                .setTitle("Maps")
+                .setTitle("Bioscope")
                 .setImage(
                     CarIcon.Builder(
-                        IconCompat.createWithResource(carContext, android.R.drawable.ic_menu_mapmode)
+                        IconCompat.createWithResource(carContext, android.R.drawable.ic_menu_slideshow)
                     ).build()
                 )
                 .setOnClickListener {
-                    screenManager.push(BrowserScreen(carContext, "https://maps.google.com"))
+                    screenManager.push(BrowserScreen(carContext, "https://www.bioscopelive.com"))
+                }
+                .build()
+        )
+
+        // 🎭 Chorki (Bangladeshi streaming)
+        gridItems.addItem(
+            GridItem.Builder()
+                .setTitle("Chorki")
+                .setImage(
+                    CarIcon.Builder(
+                        IconCompat.createWithResource(carContext, android.R.drawable.ic_menu_gallery)
+                    ).build()
+                )
+                .setOnClickListener {
+                    screenManager.push(BrowserScreen(carContext, "https://chorki.com"))
                 }
                 .build()
         )
@@ -91,21 +109,6 @@ class MainScreen(carContext: CarContext) : Screen(carContext) {
                 )
                 .setOnClickListener {
                     screenManager.push(FileExplorerScreen(carContext))
-                }
-                .build()
-        )
-
-        // 🔍 Search
-        gridItems.addItem(
-            GridItem.Builder()
-                .setTitle("Search")
-                .setImage(
-                    CarIcon.Builder(
-                        IconCompat.createWithResource(carContext, android.R.drawable.ic_menu_search)
-                    ).build()
-                )
-                .setOnClickListener {
-                    screenManager.push(SearchScreen(carContext))
                 }
                 .build()
         )

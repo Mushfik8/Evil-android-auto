@@ -14,7 +14,10 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
+import android.view.PixelCopy
 import android.view.Surface
+import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -30,9 +33,23 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * REWRITTEN — Renders a WebView offscreen and draws frames to an Android Auto Surface.
  *
- * KEY FIX: Handles fullscreen video via WebChromeClient.onShowCustomView().
- * When a user taps fullscreen on YouTube/any video, the video View is captured
- * and rendered directly to the Surface instead of the WebView bitmap.
+ * VIDEO RENDERING STRATEGY (3-tier approach):
+ *
+ * 1. VIDEO URL EXTRACTION (BEST — ExoPlayer direct to Surface):
+ *    JavaScript extracts video URLs from the page (via VideoExtractor).
+ *    When found, SurfaceVideoPlayer renders the video directly to the AA Surface
+ *    using hardware-accelerated ExoPlayer. Audio goes through car speakers.
+ *    This bypasses WebView entirely for video and gives full framerate.
+ *
+ * 2. FULLSCREEN VIDEO CAPTURE (GOOD — TextureView.getBitmap):
+ *    When onShowCustomView() is called (user taps fullscreen), we get the video View.
+ *    If it's a TextureView, we use getBitmap() to capture frames.
+ *    If it contains a TextureView child, we find and capture that.
+ *    This gives us actual video frames at ~20fps.
+ *
+ * 3. WEBVIEW BITMAP CAPTURE (FALLBACK — for browsing/non-video):
+ *    Standard View.draw(Canvas) for normal web browsing.
+ *    Video elements will appear black but everything else renders fine.
  *
  * Audio: Requests AudioFocus so sound comes through the car speakers.
  * User Agent: Spoofs Chrome Mobile so YouTube/streaming sites work.
@@ -41,7 +58,8 @@ class WebViewRenderer(private val context: Context) {
 
     companion object {
         private const val TAG = "WebViewRenderer"
-        private const val RENDER_INTERVAL_MS = 50L  // ~20fps for smoother video
+        private const val RENDER_INTERVAL_BROWSE_MS = 50L   // ~20fps for browsing
+        private const val RENDER_INTERVAL_VIDEO_MS = 33L    // ~30fps for video
         private const val DEFAULT_URL = "https://www.google.com"
 
         // Chrome Mobile user agent — makes YouTube/streaming sites work
@@ -63,6 +81,11 @@ class WebViewRenderer(private val context: Context) {
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private val isFullscreenVideo = AtomicBoolean(false)
 
+    // Direct video player (ExoPlayer → Surface)
+    private var surfaceVideoPlayer: SurfaceVideoPlayer? = null
+    private val isDirectVideoPlaying = AtomicBoolean(false)
+    private val extractedVideoUrls = mutableListOf<String>()
+
     // Audio
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -74,6 +97,7 @@ class WebViewRenderer(private val context: Context) {
     var onProgressChanged: ((Int) -> Unit)? = null
     var onTitleChanged: ((String) -> Unit)? = null
     var onInputFocused: ((Boolean) -> Unit)? = null
+    var onVideoModeChanged: ((Boolean) -> Unit)? = null
 
     // Current page state
     private val currentUrl = AtomicReference(DEFAULT_URL)
@@ -90,6 +114,27 @@ class WebViewRenderer(private val context: Context) {
 
                 // Init audio manager
                 audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+                // Init direct video player
+                surfaceVideoPlayer = SurfaceVideoPlayer(context).apply {
+                    onVideoStarted = {
+                        Log.i(TAG, "🎬 Direct video started playing on Surface")
+                        isDirectVideoPlaying.set(true)
+                        // Mute WebView audio to avoid double-playing
+                        mainHandler.post { injectScript(VideoExtractor.getMuteAllVideosScript()) }
+                        onVideoModeChanged?.invoke(true)
+                    }
+                    onVideoEnded = {
+                        Log.i(TAG, "🎬 Direct video ended")
+                        isDirectVideoPlaying.set(false)
+                        onVideoModeChanged?.invoke(false)
+                    }
+                    onVideoError = { error ->
+                        Log.w(TAG, "Direct video error: $error, falling back to WebView")
+                        isDirectVideoPlaying.set(false)
+                        onVideoModeChanged?.invoke(false)
+                    }
+                }
 
                 webView = WebView(context).apply {
                     // Layout to match car screen
@@ -136,6 +181,8 @@ class WebViewRenderer(private val context: Context) {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             url?.let {
                                 currentUrl.set(it)
+                                // Clear extracted URLs for new page
+                                extractedVideoUrls.clear()
                                 onPageStarted?.invoke(it)
                             }
                         }
@@ -146,7 +193,11 @@ class WebViewRenderer(private val context: Context) {
                                 onPageFinished?.invoke(it)
                             }
                             injectInputDetection()
-                            // Inject helper JS for better video handling
+                            // Inject video URL extractor
+                            injectScript(VideoExtractor.getExtractionScript())
+                            // Inject responsive CSS helper
+                            injectResponsiveCSS()
+                            // Inject auto-fullscreen helper
                             injectVideoHelper()
                         }
                     }
@@ -168,8 +219,12 @@ class WebViewRenderer(private val context: Context) {
                          * CRITICAL: Called when a video enters fullscreen mode.
                          * YouTube, Bioscope, Chorki — when user taps the fullscreen
                          * button on a video player, this method is called with the
-                         * video View. We render THIS view to the Surface instead of
-                         * the WebView bitmap, which gives us actual video frames.
+                         * video View.
+                         *
+                         * Strategy:
+                         * 1. Check if we have an extracted video URL → use ExoPlayer direct
+                         * 2. Check if view is/contains TextureView → capture via getBitmap()
+                         * 3. Fallback: try View.draw() (may produce black for video)
                          */
                         override fun onShowCustomView(
                             view: View?,
@@ -189,8 +244,23 @@ class WebViewRenderer(private val context: Context) {
                             )
                             view.layout(0, 0, surfaceWidth, surfaceHeight)
 
+                            // Strategy 1: Try direct ExoPlayer with extracted URL
+                            val bestUrl = VideoExtractor.prioritizeUrl(extractedVideoUrls)
+                            if (bestUrl != null) {
+                                Log.i(TAG, "🎬 Using extracted URL for direct playback: $bestUrl")
+                                val s = surface
+                                if (s != null && s.isValid) {
+                                    surfaceVideoPlayer?.play(bestUrl, s)
+                                    // Pause the WebView video to avoid double audio
+                                    injectScript(VideoExtractor.getPauseAllVideosScript())
+                                    return
+                                }
+                            }
+
+                            // Strategy 2/3: TextureView capture or View.draw fallback
                             // Request audio focus for video sound
                             requestAudioFocus()
+                            Log.i(TAG, "🎬 Using fullscreen view capture (TextureView/View.draw)")
                         }
 
                         /**
@@ -203,12 +273,20 @@ class WebViewRenderer(private val context: Context) {
                             fullscreenVideoView = null
                             fullscreenCallback?.onCustomViewHidden()
                             fullscreenCallback = null
+
+                            // Stop direct video player if active
+                            if (isDirectVideoPlaying.get()) {
+                                surfaceVideoPlayer?.stop()
+                                isDirectVideoPlaying.set(false)
+                                onVideoModeChanged?.invoke(false)
+                            }
+
                             abandonAudioFocus()
                         }
                     }
 
-                    // JavaScript bridge
-                    addJavascriptInterface(InputBridge(), "AutoFreedomBridge")
+                    // JavaScript bridge — includes video URL reporting
+                    addJavascriptInterface(NativeBridge(), "AutoFreedomBridge")
 
                     // SOFTWARE layer forces bitmap capture to include all content
                     setLayerType(View.LAYER_TYPE_SOFTWARE, null)
@@ -218,7 +296,7 @@ class WebViewRenderer(private val context: Context) {
                 renderBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
 
                 isInitialized.set(true)
-                Log.i(TAG, "WebView initialized: ${width}x${height} with Chrome UA")
+                Log.i(TAG, "WebView initialized: ${width}x${height} with Chrome UA + VideoExtractor")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize WebView", e)
@@ -246,6 +324,8 @@ class WebViewRenderer(private val context: Context) {
                 renderBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             }
         }
+        // Update surface for direct video player
+        surfaceVideoPlayer?.updateSurface(surface)
     }
 
     fun startRendering() {
@@ -261,7 +341,10 @@ class WebViewRenderer(private val context: Context) {
     }
 
     /**
-     * CORE RENDER LOOP — switches between WebView bitmap and fullscreen video
+     * CORE RENDER LOOP — 3-tier rendering strategy:
+     * 1. Direct ExoPlayer video → skip bitmap entirely (ExoPlayer renders to Surface)
+     * 2. Fullscreen TextureView → getBitmap() for video frames
+     * 3. WebView bitmap → View.draw() for normal browsing
      */
     private fun renderLoop() {
         if (!isRendering.get()) return
@@ -274,12 +357,19 @@ class WebViewRenderer(private val context: Context) {
                     return@post
                 }
 
+                // TIER 1: Direct ExoPlayer rendering — no bitmap needed!
+                // ExoPlayer renders directly to the Surface via hardware decoder.
+                // We just need to schedule the next check.
+                if (isDirectVideoPlaying.get()) {
+                    scheduleNextFrame()
+                    return@post
+                }
+
                 val bmp = renderBitmap ?: return@post
                 val bitmapCanvas = Canvas(bmp)
 
                 if (isFullscreenVideo.get() && fullscreenVideoView != null) {
-                    // ===== FULLSCREEN VIDEO MODE =====
-                    // Render the video View directly — gives us actual video frames
+                    // TIER 2: Fullscreen video capture
                     val videoView = fullscreenVideoView!!
 
                     // Re-layout in case size changed
@@ -289,11 +379,41 @@ class WebViewRenderer(private val context: Context) {
                     )
                     videoView.layout(0, 0, surfaceWidth, surfaceHeight)
 
-                    // Clear with black then draw video
+                    // Clear with black
                     bitmapCanvas.drawColor(Color.BLACK)
-                    videoView.draw(bitmapCanvas)
+
+                    // Try to find a TextureView inside the fullscreen view
+                    val textureView = findTextureView(videoView)
+                    if (textureView != null) {
+                        // TextureView.getBitmap() captures actual video frames!
+                        val videoBmp = textureView.bitmap
+                        if (videoBmp != null) {
+                            // Scale video to fit surface
+                            val srcRatio = videoBmp.width.toFloat() / videoBmp.height
+                            val dstRatio = surfaceWidth.toFloat() / surfaceHeight
+                            val dstRect = if (srcRatio > dstRatio) {
+                                // Video wider than surface — fit width, letterbox height
+                                val h = (surfaceWidth / srcRatio).toInt()
+                                val top = (surfaceHeight - h) / 2
+                                android.graphics.Rect(0, top, surfaceWidth, top + h)
+                            } else {
+                                // Video taller — fit height, pillarbox width
+                                val w = (surfaceHeight * srcRatio).toInt()
+                                val left = (surfaceWidth - w) / 2
+                                android.graphics.Rect(left, 0, left + w, surfaceHeight)
+                            }
+                            bitmapCanvas.drawBitmap(videoBmp, null, dstRect, null)
+                            videoBmp.recycle()
+                        } else {
+                            // TextureView returned null bitmap — draw the view directly
+                            videoView.draw(bitmapCanvas)
+                        }
+                    } else {
+                        // No TextureView found — use View.draw() fallback
+                        videoView.draw(bitmapCanvas)
+                    }
                 } else {
-                    // ===== NORMAL BROWSING MODE =====
+                    // TIER 3: Normal browsing — WebView bitmap capture
                     val wv = webView ?: return@post
                     wv.draw(bitmapCanvas)
                 }
@@ -315,9 +435,29 @@ class WebViewRenderer(private val context: Context) {
         }
     }
 
+    /**
+     * Recursively search for a TextureView inside a view hierarchy.
+     * Fullscreen video views often wrap the actual TextureView in a FrameLayout.
+     */
+    private fun findTextureView(view: View): TextureView? {
+        if (view is TextureView) return view
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                val found = findTextureView(view.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
     private fun scheduleNextFrame() {
         if (isRendering.get()) {
-            mainHandler.postDelayed({ renderLoop() }, RENDER_INTERVAL_MS)
+            val interval = if (isFullscreenVideo.get() || isDirectVideoPlaying.get()) {
+                RENDER_INTERVAL_VIDEO_MS  // Faster for video
+            } else {
+                RENDER_INTERVAL_BROWSE_MS  // Normal for browsing
+            }
+            mainHandler.postDelayed({ renderLoop() }, interval)
         }
     }
 
@@ -369,6 +509,13 @@ class WebViewRenderer(private val context: Context) {
             if (isFullscreenVideo.get()) {
                 exitFullscreen()
             }
+            // Stop direct video if playing
+            if (isDirectVideoPlaying.get()) {
+                stopDirectVideo()
+            }
+
+            // Clear extracted URLs for new navigation
+            extractedVideoUrls.clear()
 
             val finalUrl = when {
                 url.startsWith("http://") || url.startsWith("https://") -> url
@@ -381,6 +528,10 @@ class WebViewRenderer(private val context: Context) {
     }
 
     fun goBack(): Boolean {
+        if (isDirectVideoPlaying.get()) {
+            stopDirectVideo()
+            return true
+        }
         if (isFullscreenVideo.get()) {
             exitFullscreen()
             return true
@@ -415,13 +566,79 @@ class WebViewRenderer(private val context: Context) {
 
     fun getCurrentUrl(): String = currentUrl.get()
     fun getCurrentTitle(): String = currentTitle.get()
-    fun canGoBack(): Boolean = webView?.canGoBack() == true || isFullscreenVideo.get()
+    fun canGoBack(): Boolean = webView?.canGoBack() == true || isFullscreenVideo.get() || isDirectVideoPlaying.get()
     fun canGoForward(): Boolean = webView?.canGoForward() == true
+
+    // ==================== Direct Video Controls ====================
+
+    /**
+     * Check if direct video (ExoPlayer) is currently playing.
+     */
+    fun isDirectVideoActive(): Boolean = isDirectVideoPlaying.get()
+
+    /**
+     * Toggle play/pause for direct video.
+     */
+    fun toggleDirectVideo() {
+        surfaceVideoPlayer?.togglePlayPause()
+    }
+
+    /**
+     * Seek forward in direct video.
+     */
+    fun seekDirectVideoForward(ms: Long = 10_000) {
+        surfaceVideoPlayer?.seekForward(ms)
+    }
+
+    /**
+     * Seek backward in direct video.
+     */
+    fun seekDirectVideoBack(ms: Long = 10_000) {
+        surfaceVideoPlayer?.seekBack(ms)
+    }
+
+    /**
+     * Stop direct video and return to WebView rendering.
+     */
+    fun stopDirectVideo() {
+        surfaceVideoPlayer?.stop()
+        isDirectVideoPlaying.set(false)
+        onVideoModeChanged?.invoke(false)
+    }
+
+    /**
+     * Try to play the best extracted video URL directly.
+     * Called when user explicitly wants to switch to direct video mode.
+     */
+    fun tryDirectVideoPlayback(): Boolean {
+        val bestUrl = VideoExtractor.prioritizeUrl(extractedVideoUrls)
+        if (bestUrl != null) {
+            val s = surface
+            if (s != null && s.isValid) {
+                Log.i(TAG, "🎬 Manual trigger: playing $bestUrl directly")
+                surfaceVideoPlayer?.play(bestUrl, s)
+                injectScript(VideoExtractor.getPauseAllVideosScript())
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Check if we have extracted video URLs available.
+     */
+    fun hasExtractedVideoUrls(): Boolean = extractedVideoUrls.isNotEmpty()
 
     // ==================== Touch Events ====================
 
     fun handleClick(x: Float, y: Float) {
         mainHandler.post {
+            // If direct video is playing, toggle play/pause
+            if (isDirectVideoPlaying.get()) {
+                surfaceVideoPlayer?.togglePlayPause()
+                return@post
+            }
+
             val targetView = if (isFullscreenVideo.get()) fullscreenVideoView else webView
             targetView?.let { v ->
                 val downTime = SystemClock.uptimeMillis()
@@ -442,21 +659,21 @@ class WebViewRenderer(private val context: Context) {
 
     fun handleScroll(distanceX: Float, distanceY: Float) {
         mainHandler.post {
-            if (isFullscreenVideo.get()) return@post
+            if (isFullscreenVideo.get() || isDirectVideoPlaying.get()) return@post
             webView?.scrollBy(distanceX.toInt(), distanceY.toInt())
         }
     }
 
     fun handleFling(velocityX: Float, velocityY: Float) {
         mainHandler.post {
-            if (isFullscreenVideo.get()) return@post
+            if (isFullscreenVideo.get() || isDirectVideoPlaying.get()) return@post
             webView?.flingScroll(-velocityX.toInt(), -velocityY.toInt())
         }
     }
 
     fun handleScale(focusX: Float, focusY: Float, scaleFactor: Float) {
         mainHandler.post {
-            if (isFullscreenVideo.get()) return@post
+            if (isFullscreenVideo.get() || isDirectVideoPlaying.get()) return@post
             webView?.let { wv ->
                 val zoomLevel = (scaleFactor * 100).toInt()
                 wv.evaluateJavascript(
@@ -510,6 +727,12 @@ class WebViewRenderer(private val context: Context) {
 
     // ==================== JavaScript Injection ====================
 
+    private fun injectScript(js: String) {
+        mainHandler.post {
+            webView?.evaluateJavascript(js, null)
+        }
+    }
+
     private fun injectInputDetection() {
         mainHandler.post {
             webView?.evaluateJavascript(
@@ -562,10 +785,64 @@ class WebViewRenderer(private val context: Context) {
         }
     }
 
-    inner class InputBridge {
+    /**
+     * Inject responsive CSS to make websites render properly on car screens.
+     */
+    private fun injectResponsiveCSS() {
+        mainHandler.post {
+            webView?.evaluateJavascript(
+                """
+                (function() {
+                    if (window._afResponsive) return;
+                    window._afResponsive = true;
+
+                    // Ensure viewport meta tag exists for proper mobile rendering
+                    var viewport = document.querySelector('meta[name="viewport"]');
+                    if (!viewport) {
+                        viewport = document.createElement('meta');
+                        viewport.name = 'viewport';
+                        viewport.content = 'width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes';
+                        document.head.appendChild(viewport);
+                    }
+
+                    // Add CSS for better car-screen readability
+                    var style = document.createElement('style');
+                    style.textContent = [
+                        '/* AutoFreedom responsive enhancements */',
+                        'body { -webkit-text-size-adjust: 100%; }',
+                        'video { max-width: 100%; height: auto; }',
+                        'img { max-width: 100%; height: auto; }'
+                    ].join('\n');
+                    document.head.appendChild(style);
+                })();
+                """.trimIndent(), null
+            )
+        }
+    }
+
+    /**
+     * JavaScript bridge — receives callbacks from injected JavaScript.
+     */
+    inner class NativeBridge {
         @JavascriptInterface
         fun onInputFocused(focused: Boolean) {
             onInputFocused?.invoke(focused)
+        }
+
+        /**
+         * Called by VideoExtractor JavaScript when a video URL is found.
+         */
+        @JavascriptInterface
+        fun onVideoUrlFound(url: String, source: String) {
+            Log.i(TAG, "🎬 Video URL found [$source]: $url")
+            if (VideoExtractor.isPlayableVideoUrl(url)) {
+                mainHandler.post {
+                    if (!extractedVideoUrls.contains(url)) {
+                        extractedVideoUrls.add(url)
+                        Log.i(TAG, "🎬 Added playable URL (${extractedVideoUrls.size} total): $url")
+                    }
+                }
+            }
         }
     }
 
@@ -574,6 +851,7 @@ class WebViewRenderer(private val context: Context) {
     fun destroy() {
         stopRendering()
         exitFullscreen()
+        stopDirectVideo()
         abandonAudioFocus()
         mainHandler.post {
             webView?.destroy()
@@ -581,6 +859,8 @@ class WebViewRenderer(private val context: Context) {
             renderBitmap?.recycle()
             renderBitmap = null
         }
+        surfaceVideoPlayer?.stop()
+        surfaceVideoPlayer = null
         surface = null
     }
 }

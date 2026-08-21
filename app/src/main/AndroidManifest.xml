@@ -27,8 +27,9 @@
     <!-- Post notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Car App Library navigation permission -->
+    <!-- Car App Library permissions -->
     <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
+    <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
 
     <application
@@ -49,7 +50,7 @@
         <!-- Minimum Car App API level -->
         <meta-data
             android:name="androidx.car.app.minCarApiLevel"
-            android:value="7" />
+            android:value="1" />
 
         <!-- ==================== CAR APP SERVICE ==================== -->
         <service
@@ -59,7 +60,6 @@
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
                 <category android:name="androidx.car.app.category.NAVIGATION" />
-                <category android:name="androidx.car.app.category.POI" />
             </intent-filter>
         </service>
 

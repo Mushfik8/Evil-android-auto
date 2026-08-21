@@ -9,6 +9,7 @@ import androidx.car.app.model.ListTemplate
 import androidx.car.app.model.Row
 import androidx.car.app.model.Template
 import androidx.core.graphics.drawable.IconCompat
+import android.net.Uri
 import com.autofreedom.app.media.MediaScanner
 import com.autofreedom.app.media.MediaService
 import kotlinx.coroutines.CoroutineScope
@@ -165,8 +166,15 @@ class MediaBrowseScreen(
                         .setTitle("$icon ${item.title}")
                         .addText("${item.artist} • $duration")
                         .setOnClickListener {
-                            // Play this item and queue remaining items
-                            MediaService.instance?.playbackEngine?.playQueue(items, index)
+                            if (item.isVideo) {
+                                // Play video directly on car screen with VideoPlayerScreen
+                                screenManager.push(
+                                    VideoPlayerScreen(carContext, item.uri, item.title)
+                                )
+                            } else {
+                                // Play audio through media service
+                                MediaService.instance?.playbackEngine?.playQueue(items, index)
+                            }
                         }
                         .build()
                 )

@@ -18,7 +18,7 @@ import androidx.car.app.model.Template
  * 1. User taps the URL/keyboard button in the browser toolbar
  * 2. User taps an input field on a web page (detected via JavaScript bridge)
  *
- * Common quick-access URLs are shown as suggestions.
+ * Quick-access URLs include streaming sites for quick launching.
  */
 class BrowserKeyboardScreen(
     carContext: CarContext,
@@ -28,18 +28,18 @@ class BrowserKeyboardScreen(
     private var searchText = ""
     private var showSuggestions = true
 
-    // Quick access URLs
+    // Quick access URLs — streaming sites + popular sites
     private val quickUrls = listOf(
         "YouTube" to "https://m.youtube.com",
+        "Bioscope" to "https://www.bioscopelive.com",
+        "Chorki" to "https://chorki.com",
+        "Hoichoi" to "https://www.hoichoi.tv",
         "Google" to "https://www.google.com",
         "Google Maps" to "https://maps.google.com",
         "Twitter / X" to "https://x.com",
         "Reddit" to "https://www.reddit.com",
-        "Wikipedia" to "https://en.m.wikipedia.org",
         "Facebook" to "https://m.facebook.com",
-        "Instagram" to "https://www.instagram.com",
-        "DuckDuckGo" to "https://duckduckgo.com",
-        "Gmail" to "https://mail.google.com",
+        "Wikipedia" to "https://en.m.wikipedia.org",
     )
 
     override fun onGetTemplate(): Template {
@@ -72,11 +72,24 @@ class BrowserKeyboardScreen(
                     .build()
             )
 
-            // Show search suggestion
+            // Show search suggestions
             if (!searchText.startsWith("http")) {
+                // YouTube search — most useful for video
                 listBuilder.addItem(
                     Row.Builder()
-                        .setTitle("Search: $searchText")
+                        .setTitle("📺 YouTube: $searchText")
+                        .addText("Search & watch on YouTube")
+                        .setOnClickListener {
+                            onTextSubmitted("https://m.youtube.com/results?search_query=${java.net.URLEncoder.encode(searchText, "UTF-8")}")
+                            screenManager.pop()
+                        }
+                        .build()
+                )
+
+                // Google search
+                listBuilder.addItem(
+                    Row.Builder()
+                        .setTitle("🔍 Search: $searchText")
                         .addText("Search on Google")
                         .setOnClickListener {
                             onTextSubmitted("https://www.google.com/search?q=${java.net.URLEncoder.encode(searchText, "UTF-8")}")
@@ -85,13 +98,25 @@ class BrowserKeyboardScreen(
                         .build()
                 )
 
-                // YouTube search suggestion
+                // Bioscope search
                 listBuilder.addItem(
                     Row.Builder()
-                        .setTitle("YouTube: $searchText")
-                        .addText("Search on YouTube")
+                        .setTitle("🎬 Bioscope: $searchText")
+                        .addText("Search Bioscope")
                         .setOnClickListener {
-                            onTextSubmitted("https://m.youtube.com/results?search_query=${java.net.URLEncoder.encode(searchText, "UTF-8")}")
+                            onTextSubmitted("https://www.bioscopelive.com/bn/search?q=${java.net.URLEncoder.encode(searchText, "UTF-8")}")
+                            screenManager.pop()
+                        }
+                        .build()
+                )
+
+                // Chorki search
+                listBuilder.addItem(
+                    Row.Builder()
+                        .setTitle("🎭 Chorki: $searchText")
+                        .addText("Search Chorki")
+                        .setOnClickListener {
+                            onTextSubmitted("https://chorki.com/search?q=${java.net.URLEncoder.encode(searchText, "UTF-8")}")
                             screenManager.pop()
                         }
                         .build()
@@ -133,7 +158,7 @@ class BrowserKeyboardScreen(
         )
             .setHeaderAction(Action.BACK)
             .setShowKeyboardByDefault(true)
-            .setSearchHint("Enter URL or search…")
+            .setSearchHint("URL, YouTube, Bioscope, Chorki…")
             .setItemList(listBuilder.build())
             .build()
     }

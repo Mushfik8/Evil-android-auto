@@ -15,16 +15,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Unified search screen — searches across media files, web, and places.
+ * Unified search screen — searches across media files, web, YouTube,
+ * Bioscope, Chorki, Hoichoi, and local files.
  *
  * Uses SearchTemplate which provides:
  * - On-screen keyboard when car is parked
  * - Voice input when driving
  *
  * Search results are categorized and actionable:
- * - Media files → tap to play
+ * - Media files → tap to play (video → VideoPlayerScreen, audio → PlaybackEngine)
  * - Web queries → tap to open in browser
- * - URLs → tap to open directly
+ * - Streaming sites → tap to search on YouTube/Bioscope/Chorki
  */
 class SearchScreen(carContext: CarContext) : Screen(carContext) {
 
@@ -50,7 +51,7 @@ class SearchScreen(carContext: CarContext) : Screen(carContext) {
             listBuilder.addItem(
                 Row.Builder()
                     .setTitle("📺 YouTube")
-                    .addText("Open YouTube in browser")
+                    .addText("Watch videos on car screen")
                     .setOnClickListener {
                         screenManager.push(BrowserScreen(carContext, "https://m.youtube.com"))
                     }
@@ -58,10 +59,19 @@ class SearchScreen(carContext: CarContext) : Screen(carContext) {
             )
             listBuilder.addItem(
                 Row.Builder()
-                    .setTitle("🗺️ Google Maps")
-                    .addText("Open Maps in browser")
+                    .setTitle("🎬 Bioscope")
+                    .addText("Bangladeshi movies & shows")
                     .setOnClickListener {
-                        screenManager.push(BrowserScreen(carContext, "https://maps.google.com"))
+                        screenManager.push(BrowserScreen(carContext, "https://www.bioscopelive.com"))
+                    }
+                    .build()
+            )
+            listBuilder.addItem(
+                Row.Builder()
+                    .setTitle("🎭 Chorki")
+                    .addText("Bangladeshi drama & entertainment")
+                    .setOnClickListener {
+                        screenManager.push(BrowserScreen(carContext, "https://chorki.com"))
                     }
                     .build()
             )
@@ -86,25 +96,11 @@ class SearchScreen(carContext: CarContext) : Screen(carContext) {
         } else {
             // Show search results
 
-            // Web search option
-            listBuilder.addItem(
-                Row.Builder()
-                    .setTitle("🔍 Search web: $searchText")
-                    .addText("Open Google search in browser")
-                    .setOnClickListener {
-                        val query = java.net.URLEncoder.encode(searchText, "UTF-8")
-                        screenManager.push(
-                            BrowserScreen(carContext, "https://www.google.com/search?q=$query")
-                        )
-                    }
-                    .build()
-            )
-
             // YouTube search option
             listBuilder.addItem(
                 Row.Builder()
                     .setTitle("📺 YouTube: $searchText")
-                    .addText("Search on YouTube")
+                    .addText("Search & watch on YouTube")
                     .setOnClickListener {
                         val query = java.net.URLEncoder.encode(searchText, "UTF-8")
                         screenManager.push(
@@ -117,8 +113,64 @@ class SearchScreen(carContext: CarContext) : Screen(carContext) {
                     .build()
             )
 
-            // Media file results
-            val maxMediaResults = 6.coerceAtMost(mediaResults.size)
+            // Web search option
+            listBuilder.addItem(
+                Row.Builder()
+                    .setTitle("🔍 Google: $searchText")
+                    .addText("Search the web")
+                    .setOnClickListener {
+                        val query = java.net.URLEncoder.encode(searchText, "UTF-8")
+                        screenManager.push(
+                            BrowserScreen(carContext, "https://www.google.com/search?q=$query")
+                        )
+                    }
+                    .build()
+            )
+
+            // Bioscope search
+            listBuilder.addItem(
+                Row.Builder()
+                    .setTitle("🎬 Bioscope: $searchText")
+                    .addText("Search Bioscope movies & shows")
+                    .setOnClickListener {
+                        val query = java.net.URLEncoder.encode(searchText, "UTF-8")
+                        screenManager.push(
+                            BrowserScreen(carContext, "https://www.bioscopelive.com/bn/search?q=$query")
+                        )
+                    }
+                    .build()
+            )
+
+            // Chorki search
+            listBuilder.addItem(
+                Row.Builder()
+                    .setTitle("🎭 Chorki: $searchText")
+                    .addText("Search Chorki drama & entertainment")
+                    .setOnClickListener {
+                        val query = java.net.URLEncoder.encode(searchText, "UTF-8")
+                        screenManager.push(
+                            BrowserScreen(carContext, "https://chorki.com/search?q=$query")
+                        )
+                    }
+                    .build()
+            )
+
+            // Hoichoi search
+            listBuilder.addItem(
+                Row.Builder()
+                    .setTitle("🎥 Hoichoi: $searchText")
+                    .addText("Search Hoichoi Bengali content")
+                    .setOnClickListener {
+                        val query = java.net.URLEncoder.encode(searchText, "UTF-8")
+                        screenManager.push(
+                            BrowserScreen(carContext, "https://www.hoichoi.tv/search?q=$query")
+                        )
+                    }
+                    .build()
+            )
+
+            // Media file results (limit to avoid exceeding AA list limits)
+            val maxMediaResults = 4.coerceAtMost(mediaResults.size)
             for (i in 0 until maxMediaResults) {
                 val item = mediaResults[i]
                 val icon = if (item.isVideo) "🎬" else "🎵"
@@ -127,8 +179,14 @@ class SearchScreen(carContext: CarContext) : Screen(carContext) {
                         .setTitle("$icon ${item.title}")
                         .addText("${item.artist} • ${scanner.formatDuration(item.duration)}")
                         .setOnClickListener {
-                            com.autofreedom.app.media.MediaService.instance
-                                ?.playbackEngine?.play(item)
+                            if (item.isVideo) {
+                                screenManager.push(
+                                    VideoPlayerScreen(carContext, item.uri, item.title)
+                                )
+                            } else {
+                                com.autofreedom.app.media.MediaService.instance
+                                    ?.playbackEngine?.play(item)
+                            }
                         }
                         .build()
                 )
@@ -143,17 +201,17 @@ class SearchScreen(carContext: CarContext) : Screen(carContext) {
                 }
 
                 override fun onSearchSubmitted(searchText: String) {
-                    // Open web search in browser
+                    // Default: search YouTube (most common use case for car video)
                     val query = java.net.URLEncoder.encode(searchText, "UTF-8")
                     screenManager.push(
-                        BrowserScreen(carContext, "https://www.google.com/search?q=$query")
+                        BrowserScreen(carContext, "https://m.youtube.com/results?search_query=$query")
                     )
                 }
             }
         )
             .setHeaderAction(Action.BACK)
             .setShowKeyboardByDefault(true)
-            .setSearchHint("Search web, YouTube, files…")
+            .setSearchHint("Search YouTube, Bioscope, Chorki…")
             .setItemList(listBuilder.build())
             .build()
     }
